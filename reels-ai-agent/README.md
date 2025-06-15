@@ -162,4 +162,4 @@ The application uses default settings that work out of the box. For advanced con
 
 ## License
 
-This project is open source. Please check the license file for details.
+This project is open source. Please check the license file for details. 
