@@ -130,7 +130,6 @@ graph TB
     end
     
     subgraph "Data Layer"
-        SQLITE[(💾 SQLite Database<br/>Structured Content Data)]
         CHROMADB[(🔍 ChromaDB<br/>Vector Embeddings)]
         FILESYSTEM[📁 File System<br/>Audio Downloads]
     end
@@ -161,15 +160,13 @@ graph TB
     CHAT_SERVICE --> LLAMA
     
     %% Data Storage
-    PROCESSOR --> SQLITE
     PROCESSOR --> CHROMADB
     CHAT_SERVICE --> CHROMADB
-    CHAT_SERVICE --> SQLITE
+    PROCESSOR --> FILESYSTEM
     
     %% External Services
     PROCESSOR --> YTDLP
     YTDLP --> PLATFORMS
-    PROCESSOR --> FILESYSTEM
     
     %% Styling
     classDef client fill:#667eea,stroke:#764ba2,stroke-width:2px,color:#fff
@@ -183,7 +180,7 @@ graph TB
     class FASTAPI,INGEST,CHAT,HEALTH api
     class PROCESSOR,CHAT_SERVICE,SUMMARIZER service
     class WHISPER,LLAMA,TFIDF ai
-    class SQLITE,CHROMADB,FILESYSTEM data
+    class CHROMADB,FILESYSTEM data
     class YTDLP,PLATFORMS external
 ```
 
@@ -196,7 +193,7 @@ sequenceDiagram
     participant Whisper
     participant LLaMA
     participant ChromaDB
-    participant SQLite
+    participant FileSystem
 
     %% Content Processing Flow
     User->>FastAPI: POST /api/process/ (video URL)
@@ -207,7 +204,6 @@ sequenceDiagram
     ContentProcessor->>ContentProcessor: extract_keywords(text)
     ContentProcessor->>LLaMA: generate_summary(text)
     LLaMA-->>ContentProcessor: summary
-    ContentProcessor->>SQLite: store_content(metadata)
     ContentProcessor->>ChromaDB: store_embeddings(content)
     ContentProcessor-->>FastAPI: processing_result
     FastAPI-->>User: success_response
