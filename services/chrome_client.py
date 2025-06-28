@@ -1,7 +1,12 @@
+import os
 import logging
 from typing import Optional
 import chromadb
 from chromadb.api.models.Collection import Collection
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -9,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Constants
 DEFAULT_COLLECTION_NAME = "reel_summaries"
-CHROMA_DB_PATH = "./chroma_db"
+CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_db")
 
 def get_collection(name: str = DEFAULT_COLLECTION_NAME) -> Collection:
     """

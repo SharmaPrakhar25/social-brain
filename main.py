@@ -7,9 +7,9 @@ chat interface for querying the processed content.
 
 Features:
 - Video content processing with Whisper transcription
-- LLaMA-powered summarization and chat
+- Ollama-powered summarization and chat
 - Keyword extraction and categorization
-- Structured database storage with SQLAlchemy
+- File-based storage with JSON
 - Semantic search with ChromaDB
 - Enhanced chat interface with intent classification
 """
@@ -19,12 +19,16 @@ import logging
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from dotenv import load_dotenv
 from api.ingest import router as ingest_router
 from api.chat import router as chat_router
 
+# Load environment variables
+load_dotenv()
+
 # Configure logging levels to reduce verbosity
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, os.getenv('LOG_LEVEL', 'INFO')),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     datefmt='%H:%M:%S'
 )
@@ -37,8 +41,8 @@ logging.getLogger('torch').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 logging.getLogger('httpx').setLevel(logging.WARNING)
 
-# Disable ChromaDB telemetry
-os.environ["ANONYMIZED_TELEMETRY"] = "False"
+# Set ChromaDB telemetry from environment
+os.environ["ANONYMIZED_TELEMETRY"] = os.getenv("ANONYMIZED_TELEMETRY", "False")
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +80,7 @@ async def health_check():
         "features": [
             "video_processing",
             "keyword_extraction", 
-            "structured_storage",
+            "file_storage",
             "semantic_search",
             "intelligent_chat"
         ]
@@ -95,8 +99,7 @@ async def api_info():
             "processing": {
                 "POST /api/process/": "Process video content from URLs",
                 "GET /api/content/": "List processed content with filtering",
-                "GET /api/content/{id}": "Get specific content by ID",
-                "GET /api/stats/": "Get processing statistics"
+                "GET /api/content/{id}": "Get specific content by ID"
             },
             "chat": {
                 "POST /api/chat/": "Chat with your content library",
@@ -115,20 +118,20 @@ async def api_info():
         "features": {
             "content_processing": {
                 "transcription": "Whisper-based audio transcription",
-                "summarization": "LLaMA-powered intelligent summaries",
+                "summarization": "Ollama-powered intelligent summaries",
                 "keyword_extraction": "TF-IDF based keyword extraction",
                 "categorization": "Automatic content categorization",
                 "metadata_extraction": "Rich metadata from video platforms"
             },
             "storage": {
-                "structured_database": "SQLAlchemy with SQLite/PostgreSQL",
+                "file_storage": "JSON-based content storage",
                 "vector_database": "ChromaDB for semantic search",
                 "keyword_tracking": "Frequency-based keyword management"
             },
             "chat_interface": {
                 "intent_classification": "Automatic query intent detection",
                 "semantic_search": "Vector-based content retrieval",
-                "contextual_responses": "LLaMA-powered conversational AI",
+                "contextual_responses": "Ollama-powered conversational AI",
                 "structured_output": "Formatted responses with sources"
             }
         }

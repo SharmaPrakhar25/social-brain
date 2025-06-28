@@ -3,31 +3,29 @@ Enhanced Content Processing Service
 
 This module handles:
 - Video/audio transcription using Whisper
-- Content summarization using LLaMA
+- Content summarization using Ollama
 - Keyword extraction and categorization
 - Metadata extraction
-- Structured data storage
+- File-based storage
 """
 
 import os
 import whisper
 import yt_dlp
-import uuid
 import re
-from llama_cpp import Llama
+import requests
 import logging
-from typing import Dict, List, Optional, Tuple
 import tempfile
-import subprocess
-import dotenv
+import numpy as np
+from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 from urllib.parse import urlparse
+from dotenv import load_dotenv
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.cluster import KMeans
-import numpy as np
+from .instagram_extractor import instagram_extractor
 
 # Load environment variables
-dotenv.load_dotenv()
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -37,39 +35,41 @@ logger = logging.getLogger(__name__)
 try:
     import warnings
     warnings.filterwarnings("ignore", category=UserWarning)
-    whisper_model = whisper.load_model("base", download_root=None, in_memory=False)
+    whisper_model = whisper.load_model(os.getenv("WHISPER_MODEL", "base"), download_root=None, in_memory=False)
     logger.info("Whisper model loaded successfully")
 except Exception as e:
     logger.error(f"Failed to load Whisper model: {e}")
     whisper_model = None
 
-# Global LLM model loading
-def load_llama_model():
-    model_path = os.getenv('LLAMA_MODEL_PATH')
-    logger.info(f"Loading LLaMA model from: {model_path}")
-    
-    if not model_path or not os.path.exists(model_path):
-        logger.error("LLaMA model not found")
-        return None
-    
-    try:
-        llm = Llama(
-            model_path=model_path, 
-            n_ctx=2048,
-            n_batch=512,
-            verbose=False,  # Disable verbose output
-            logits_all=False,
-            use_mmap=True,
-            use_mlock=False
-        )
-        logger.info("LLaMA model loaded successfully")
-        return llm
-    except Exception as e:
-        logger.error(f"Failed to load LLaMA model: {e}")
-        return None
+# Ollama API configuration
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/chat")
 
-# Load the LLaMA model
-llm = load_llama_model()
+def call_ollama_api(prompt: str, max_tokens: int = 300, temperature: float = 0.3) -> str:
+    """
+    Call Ollama API for text generation
+    """
+    try:
+        data = {
+            "model": OLLAMA_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens
+            }
+        }
+        
+        response = requests.post(OLLAMA_API_URL, json=data, timeout=30)
+        response.raise_for_status()
+        
+        result = response.json()
+        generated_text = result["message"]["content"].strip()
+        
+        return generated_text
+        
+    except Exception as e:
+        logger.error(f"Ollama API call failed: {e}")
+        return ""
 
 class ContentProcessor:
     """
@@ -78,7 +78,6 @@ class ContentProcessor:
     
     def __init__(self):
         self.whisper_model = whisper_model
-        self.llm = llm
         
         # Predefined categories for content classification
         self.categories = [
@@ -87,9 +86,57 @@ class ContentProcessor:
             'travel', 'food', 'fashion', 'art', 'science', 'politics'
         ]
     
-    def extract_metadata_from_url(self, url: str) -> Dict[str, str]:
+    def extract_metadata_from_url(self, url: str) -> Dict:
         """
-        Extract metadata from URL using yt-dlp with enhanced title extraction
+        Extract metadata from URL with Instagram-specific enhancements
+        """
+        source_type = self.detect_source_type(url)
+        
+        # Use Instagram-specific extraction for Instagram URLs
+        if source_type == 'instagram':
+            try:
+                instagram_metadata = instagram_extractor.extract_enhanced_metadata(url)
+                
+                # Get basic metadata from yt-dlp as fallback
+                yt_metadata = self._extract_basic_metadata_yt_dlp(url)
+                
+                # Merge Instagram-specific data with yt-dlp data
+                merged_metadata = {
+                    'title': yt_metadata.get('title', ''),
+                    'author': yt_metadata.get('author', '') or instagram_metadata.get('author_info', {}).get('username', ''),
+                    'platform_id': yt_metadata.get('platform_id', '') or instagram_metadata.get('shortcode', ''),
+                    'duration': yt_metadata.get('duration', 0),
+                    'published_at': yt_metadata.get('published_at', '') or instagram_metadata.get('creation_timestamp', ''),
+                    'description': yt_metadata.get('description', '') or instagram_metadata.get('caption', ''),
+                    
+                    # Instagram-specific fields
+                    'hashtags': instagram_metadata.get('hashtags', []),
+                    'mentions': instagram_metadata.get('mentions', []),
+                    'engagement_metrics': instagram_metadata.get('engagement_metrics', {}),
+                    'location': instagram_metadata.get('location', ''),
+                    'music_info': instagram_metadata.get('music_info', {}),
+                    'author_info': instagram_metadata.get('author_info', {}),
+                    'visual_tags': instagram_metadata.get('visual_tags', []),
+                    'content_warnings': instagram_metadata.get('content_warnings', []),
+                    'enhanced_extraction': instagram_metadata.get('enhanced_extraction', False)
+                }
+                
+                # Use Instagram caption as description if no yt-dlp description
+                if not merged_metadata['description'] and instagram_metadata.get('caption'):
+                    merged_metadata['description'] = instagram_metadata['caption'][:200]
+                
+                return merged_metadata
+                
+            except Exception as e:
+                logger.warning(f"Instagram-specific extraction failed, falling back to yt-dlp: {e}")
+                return self._extract_basic_metadata_yt_dlp(url)
+        else:
+            # Use standard yt-dlp extraction for non-Instagram URLs
+            return self._extract_basic_metadata_yt_dlp(url)
+    
+    def _extract_basic_metadata_yt_dlp(self, url: str) -> Dict:
+        """
+        Extract basic metadata using yt-dlp
         """
         try:
             ydl_opts = {
@@ -131,18 +178,36 @@ class ContentProcessor:
                     'platform_id': info.get('id', ''),
                     'duration': duration,
                     'published_at': published_at,
-                    'description': info.get('description', '')[:200] if info.get('description') else ''
+                    'description': info.get('description', '')[:200] if info.get('description') else '',
+                    'hashtags': [],
+                    'mentions': [],
+                    'engagement_metrics': {},
+                    'location': '',
+                    'music_info': {},
+                    'author_info': {},
+                    'visual_tags': [],
+                    'content_warnings': [],
+                    'enhanced_extraction': False
                 }
                 
         except Exception as e:
-            logger.warning(f"Metadata extraction failed: {e}")
+            logger.warning(f"yt-dlp metadata extraction failed: {e}")
             return {
                 'title': '',
                 'author': '',
                 'platform_id': '',
                 'duration': 0,
                 'published_at': '',
-                'description': ''
+                'description': '',
+                'hashtags': [],
+                'mentions': [],
+                'engagement_metrics': {},
+                'location': '',
+                'music_info': {},
+                'author_info': {},
+                'visual_tags': [],
+                'content_warnings': [],
+                'enhanced_extraction': False
             }
     
     def download_audio(self, url: str) -> str:
@@ -197,11 +262,14 @@ class ContentProcessor:
             logger.error(f"Transcription failed: {e}")
             raise
     
-    def extract_keywords(self, text: str, max_keywords: int = 10) -> List[str]:
+    def extract_keywords(self, text: str, hashtags: List[str] = None, max_keywords: int = 10) -> List[str]:
         """
-        Extract keywords using TF-IDF
+        Extract keywords using TF-IDF with hashtag enhancement
         """
         if not text or len(text.strip()) < 10:
+            # If text is too short, try to extract keywords from hashtags
+            if hashtags:
+                return self._extract_keywords_from_hashtags(hashtags, max_keywords)
             return []
         
         try:
@@ -228,35 +296,82 @@ class ContentProcessor:
             
             keywords = [kw for kw, score in keyword_scores[:max_keywords] if score > 0]
             
+            # Enhance with hashtag-derived keywords
+            if hashtags:
+                hashtag_keywords = self._extract_keywords_from_hashtags(hashtags, max_keywords // 2)
+                # Merge and deduplicate
+                all_keywords = keywords + hashtag_keywords
+                seen = set()
+                unique_keywords = []
+                for kw in all_keywords:
+                    if kw.lower() not in seen:
+                        unique_keywords.append(kw)
+                        seen.add(kw.lower())
+                keywords = unique_keywords[:max_keywords]
+            
             logger.info(f"Extracted {len(keywords)} keywords")
             return keywords
             
         except Exception as e:
             logger.error(f"Keyword extraction failed: {e}")
+            # Fallback to hashtag keywords if available
+            if hashtags:
+                return self._extract_keywords_from_hashtags(hashtags, max_keywords)
             return []
     
-    def categorize_content(self, text: str, keywords: List[str]) -> str:
+    def _extract_keywords_from_hashtags(self, hashtags: List[str], max_keywords: int = 5) -> List[str]:
         """
-        Categorize content based on text and keywords
+        Extract meaningful keywords from hashtags
         """
-        if not text and not keywords:
+        if not hashtags:
+            return []
+        
+        keywords = []
+        for hashtag in hashtags[:max_keywords]:
+            # Remove # symbol and clean up
+            clean_tag = hashtag.lstrip('#').lower()
+            
+            # Skip very short or generic hashtags
+            if len(clean_tag) > 2 and clean_tag not in ['instagram', 'reels', 'viral', 'fyp']:
+                # Split camelCase hashtags
+                if any(c.isupper() for c in hashtag):
+                    # Handle camelCase
+                    words = re.findall(r'[A-Z][a-z]*|[a-z]+', hashtag)
+                    keywords.extend([word.lower() for word in words if len(word) > 2])
+                else:
+                    keywords.append(clean_tag)
+        
+        return keywords[:max_keywords]
+    
+    def categorize_content(self, text: str, keywords: List[str], hashtag_topics: List[str] = None) -> str:
+        """
+        Categorize content based on text, keywords, and hashtag topics
+        """
+        if not text and not keywords and not hashtag_topics:
             return 'general'
+        
+        # If we have hashtag topics from Instagram, give them priority
+        if hashtag_topics:
+            # Return the first hashtag topic as it's likely the most relevant
+            return hashtag_topics[0]
         
         # Combine text and keywords for analysis
         combined_text = f"{text} {' '.join(keywords)}".lower()
         
-        # Simple keyword-based categorization
+        # Enhanced keyword-based categorization
         category_keywords = {
-            'technology': ['tech', 'software', 'ai', 'computer', 'digital', 'app', 'coding', 'programming'],
-            'business': ['business', 'entrepreneur', 'startup', 'money', 'finance', 'investment', 'marketing'],
-            'entertainment': ['movie', 'film', 'show', 'celebrity', 'entertainment', 'fun', 'funny'],
-            'education': ['learn', 'education', 'tutorial', 'teach', 'study', 'course', 'lesson'],
-            'health': ['health', 'fitness', 'workout', 'diet', 'medical', 'wellness', 'exercise'],
-            'lifestyle': ['lifestyle', 'life', 'daily', 'routine', 'personal', 'home', 'family'],
-            'music': ['music', 'song', 'artist', 'album', 'concert', 'band', 'singer'],
-            'sports': ['sport', 'game', 'team', 'player', 'match', 'football', 'basketball'],
-            'food': ['food', 'recipe', 'cooking', 'restaurant', 'eat', 'meal', 'chef'],
-            'travel': ['travel', 'trip', 'vacation', 'destination', 'hotel', 'flight', 'tourism']
+            'technology': ['tech', 'software', 'ai', 'computer', 'digital', 'app', 'coding', 'programming', 'automation', 'workflow', 'n8n', 'api'],
+            'business': ['business', 'entrepreneur', 'startup', 'money', 'finance', 'investment', 'marketing', 'sales', 'growth', 'strategy'],
+            'entertainment': ['movie', 'film', 'show', 'celebrity', 'entertainment', 'fun', 'funny', 'comedy', 'drama', 'series'],
+            'education': ['learn', 'education', 'tutorial', 'teach', 'study', 'course', 'lesson', 'university', 'school', 'training'],
+            'health': ['health', 'fitness', 'workout', 'diet', 'medical', 'wellness', 'exercise', 'nutrition', 'mental', 'therapy'],
+            'lifestyle': ['lifestyle', 'life', 'daily', 'routine', 'personal', 'home', 'family', 'relationship', 'motivation'],
+            'music': ['music', 'song', 'artist', 'album', 'concert', 'band', 'singer', 'musician', 'audio', 'sound'],
+            'sports': ['sport', 'game', 'team', 'player', 'match', 'football', 'basketball', 'soccer', 'tennis', 'golf'],
+            'food': ['food', 'recipe', 'cooking', 'restaurant', 'eat', 'meal', 'chef', 'kitchen', 'cuisine', 'baking'],
+            'travel': ['travel', 'trip', 'vacation', 'destination', 'hotel', 'flight', 'tourism', 'adventure', 'explore'],
+            'fashion': ['fashion', 'style', 'outfit', 'clothing', 'design', 'trend', 'beauty', 'makeup', 'skincare'],
+            'art': ['art', 'artist', 'creative', 'design', 'drawing', 'painting', 'photography', 'visual', 'gallery']
         }
         
         category_scores = {}
@@ -293,11 +408,8 @@ class ContentProcessor:
     
     def generate_summary(self, text: str) -> str:
         """
-        Generate summary using LLaMA with improved prompting
+        Generate summary using Ollama API with improved prompting
         """
-        if not self.llm:
-            return "AI summarization not available"
-        
         if not text or len(text.strip()) < 50:
             return "Content too short to summarize"
         
@@ -306,17 +418,10 @@ class ContentProcessor:
 
 Content: {text}
 
-Summary:"""
+Provide a clear summary in 2-3 sentences that captures the essential information and key takeaways."""
         
         try:
-            response = self.llm(
-                prompt, 
-                max_tokens=300, 
-                stop=["Content:", "Summary:", "\n\n"], 
-                echo=False,
-                temperature=0.3
-            )
-            summary = response['choices'][0]['text'].strip()
+            summary = call_ollama_api(prompt, max_tokens=300, temperature=0.3)
             
             # Clean up the summary
             if summary:
@@ -364,9 +469,17 @@ Summary:"""
             audio_path = self.download_audio(url)
             transcription = self.transcribe_audio(audio_path)
             
-            # Extract keywords and analyze content
-            keywords = self.extract_keywords(transcription)
-            category = self.categorize_content(transcription, keywords)
+            # Extract keywords and analyze content with hashtag enhancement
+            hashtags = metadata.get('hashtags', [])
+            keywords = self.extract_keywords(transcription, hashtags)
+            
+            # Enhance categorization with hashtag topics
+            if source_type == 'instagram' and hashtags:
+                hashtag_topics = instagram_extractor.extract_topics_from_hashtags(hashtags)
+                category = self.categorize_content(transcription, keywords, hashtag_topics)
+            else:
+                category = self.categorize_content(transcription, keywords)
+                
             sentiment = self.analyze_sentiment(transcription)
             
             # Generate enhanced summary
@@ -378,7 +491,7 @@ Summary:"""
             if not metadata.get('title') or metadata.get('title').strip() == '':
                 metadata['title'] = title
             
-            # Prepare structured result
+            # Prepare structured result with enhanced Instagram data
             result = {
                 'source_type': source_type,
                 'original_url': url,
@@ -394,7 +507,18 @@ Summary:"""
                 'content_type': 'video',
                 'language': 'en',  # TODO: Add language detection
                 'processing_status': 'completed',
-                'published_at': metadata.get('published_at', '')
+                'published_at': metadata.get('published_at', ''),
+                
+                # Enhanced Instagram-specific fields
+                'hashtags': metadata.get('hashtags', []),
+                'mentions': metadata.get('mentions', []),
+                'engagement_metrics': metadata.get('engagement_metrics', {}),
+                'location': metadata.get('location', ''),
+                'music_info': metadata.get('music_info', {}),
+                'author_info': metadata.get('author_info', {}),
+                'visual_tags': metadata.get('visual_tags', []),
+                'content_warnings': metadata.get('content_warnings', []),
+                'enhanced_extraction': metadata.get('enhanced_extraction', False)
             }
             
             logger.info("Content processing completed successfully")
@@ -438,12 +562,8 @@ Summary:"""
 
     def generate_title(self, summary: str, keywords: List[str], transcription: str = "") -> str:
         """
-        Generate an engaging title based on summary, keywords, and transcription
+        Generate an engaging title based on summary, keywords, and transcription using Ollama API
         """
-        if not self.llm:
-            # Fallback title generation without AI
-            return self._generate_fallback_title(summary, keywords, transcription)
-        
         # Prepare content for title generation
         content_parts = []
         if summary and len(summary.strip()) > 10:
@@ -463,19 +583,10 @@ Summary:"""
 
 {content_text}
 
-Generate a clear, descriptive title that would help someone quickly understand what this content is about. Focus on the main topic, key insight, or actionable information.
-
-Title:"""
+Generate a clear, descriptive title that would help someone quickly understand what this content is about. Focus on the main topic, key insight, or actionable information. Return only the title, nothing else."""
         
         try:
-            response = self.llm(
-                prompt, 
-                max_tokens=50, 
-                stop=["Content:", "Summary:", "Keywords:", "\n\n"], 
-                echo=False,
-                temperature=0.4
-            )
-            title = response['choices'][0]['text'].strip()
+            title = call_ollama_api(prompt, max_tokens=50, temperature=0.4)
             
             # Clean up the title
             if title:

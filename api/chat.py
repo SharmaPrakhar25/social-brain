@@ -5,13 +5,17 @@ This module provides intelligent conversational interface for querying processed
 with context-aware responses, intent classification, and structured output.
 """
 
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
-from sqlalchemy.orm import Session
-from services.chat_service import chat_service
-from models.database import get_db
+import os
+import json
 import logging
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from services.chat_service import chat_service
 from typing import Dict, List, Optional
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -34,13 +38,12 @@ class ChatResponse(BaseModel):
     conversation_id: Optional[str] = None
 
 @router.post("/chat/", response_model=ChatResponse)
-def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
+def chat_endpoint(request: ChatRequest) -> ChatResponse:
     """
     Enhanced chat endpoint with intelligent response generation.
     
     Args:
         request (ChatRequest): Chat request containing user message
-        db (Session): Database session dependency
     
     Returns:
         ChatResponse: Structured response with intent, content, and sources
@@ -59,7 +62,7 @@ def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)) -> ChatRe
             )
         
         # Process the chat query
-        result = chat_service.process_chat_query(request.message.strip(), db)
+        result = chat_service.process_chat_query(request.message.strip())
         
         # Handle processing errors
         if result.get('status') == 'error':
@@ -89,16 +92,25 @@ def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)) -> ChatRe
             detail=f"An unexpected error occurred: {str(e)}"
         )
 
+def load_content_from_file() -> List[Dict]:
+    """Load content from JSON file"""
+    content_file = os.getenv("CONTENT_FILE", "data/content.json")
+    if not os.path.exists(content_file):
+        return []
+    try:
+        with open(content_file, "r") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
 @router.get("/chat/suggestions/")
-def get_chat_suggestions(db: Session = Depends(get_db)) -> Dict:
+def get_chat_suggestions() -> Dict:
     """
     Get suggested questions based on user's content library
     """
     try:
-        # Get some basic stats to generate suggestions
-        from models.content import Content, ContentKeyword
-        
-        total_content = db.query(Content).count()
+        content_list = load_content_from_file()
+        total_content = len(content_list)
         
         if total_content == 0:
             return {
@@ -110,15 +122,25 @@ def get_chat_suggestions(db: Session = Depends(get_db)) -> Dict:
             }
         
         # Get top categories and keywords for suggestions
-        from sqlalchemy import func
-        top_categories = db.query(Content.category, func.count(Content.id))\
-                          .group_by(Content.category)\
-                          .order_by(func.count(Content.id).desc())\
-                          .limit(3).all()
+        categories = {}
+        all_keywords = []
         
-        top_keywords = db.query(ContentKeyword.keyword)\
-                        .order_by(ContentKeyword.frequency.desc())\
-                        .limit(5).all()
+        for content in content_list:
+            category = content.get('category', 'general')
+            categories[category] = categories.get(category, 0) + 1
+            
+            # Extract keywords if they exist
+            if 'keywords' in content and isinstance(content['keywords'], list):
+                all_keywords.extend(content['keywords'])
+        
+        # Get top categories
+        top_categories = sorted(categories.items(), key=lambda x: x[1], reverse=True)[:3]
+        
+        # Get top keywords (simple frequency count)
+        keyword_freq = {}
+        for keyword in all_keywords:
+            keyword_freq[keyword] = keyword_freq.get(keyword, 0) + 1
+        top_keywords = sorted(keyword_freq.items(), key=lambda x: x[1], reverse=True)[:5]
         
         # Generate dynamic suggestions
         suggestions = [
@@ -132,8 +154,7 @@ def get_chat_suggestions(db: Session = Depends(get_db)) -> Dict:
             suggestions.append(f"What are the key insights from my {category} videos?")
         
         # Add keyword-based suggestions
-        for keyword_tuple in top_keywords[:3]:
-            keyword = keyword_tuple[0]
+        for keyword, freq in top_keywords[:3]:
             suggestions.append(f"Find content about {keyword}")
         
         # Add general suggestions
@@ -199,14 +220,6 @@ def get_supported_intents() -> Dict:
                     "What's my content overview?",
                     "Show me my library statistics"
                 ]
-            },
-            "general": {
-                "description": "General questions about your content",
-                "examples": [
-                    "What's the most interesting thing I've saved?",
-                    "How can I organize my content better?",
-                    "What patterns do you see in my content?"
-                ]
             }
         }
     }
@@ -218,23 +231,19 @@ def submit_chat_feedback(
     feedback_text: Optional[str] = None
 ) -> Dict:
     """
-    Submit feedback about chat responses (for future improvement)
+    Submit feedback for chat responses (for future improvements)
     """
     try:
         # Log feedback for analysis
-        logger.info(f"Chat feedback received - Helpful: {response_helpful}, ID: {response_id}, Text: {feedback_text}")
-        
-        # In a production system, you'd store this in a database
-        # For now, we'll just acknowledge the feedback
+        logger.info(f"Chat feedback received: helpful={response_helpful}, id={response_id}, text={feedback_text}")
         
         return {
             "status": "success",
-            "message": "Thank you for your feedback! This helps us improve the chat experience."
+            "message": "Thank you for your feedback!"
         }
-        
     except Exception as e:
-        logger.error(f"Error processing chat feedback: {str(e)}")
+        logger.error(f"Error submitting feedback: {str(e)}")
         return {
             "status": "error",
-            "message": "Failed to process feedback, but thank you for trying!"
+            "message": "Failed to submit feedback"
         }

@@ -1,8 +1,9 @@
 import os
 import logging
-from typing import Optional, List, Dict, Any
+import re
+from typing import List, Dict, Any
 from dotenv import load_dotenv
-from llama_cpp import Llama
+import requests
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -11,129 +12,105 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
-# Constants
-DEFAULT_MAX_TOKENS = 300
-DEFAULT_CONTEXT_WINDOW = 2048
-DEFAULT_BATCH_SIZE = 512
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/chat")
 
-def get_llm_response(query: str, context: List[Dict[str, Any]]) -> str:
+
+def generate_contextual_response_ollama(query: str, context_data: List[Dict], intent: str) -> str:
     """
-    Generate a contextual response using LLaMA model.
-    
+    Generate contextual response using Ollama API with enhanced relevance explanations.
     Args:
         query (str): User's query
-        context (List[Dict]): Relevant context from ChromaDB
-    
+        context_data (List[Dict]): Relevant content from ChromaDB
+        intent (str): Query intent (summary, recommendation, search, general)
     Returns:
         str: Generated response
     """
-    try:
-        # Load LLaMA model
-        llm = Llama(
-            model_path=os.getenv('LLAMA_MODEL_PATH'),
-            n_ctx=2048,
-            n_batch=512
-        )
-        
-        # Construct context-aware prompt
-        context_str = "\n\n".join([
-            f"Reel {i+1} (ID: {ctx.get('id', 'N/A')}):\n{ctx.get('document', '')}"
-            for i, ctx in enumerate(context)
-        ])
-        
-        prompt = f"""
-# Instagram Reels Personal Knowledge Agent - AI Assistant Instructions
+    # Prepare enhanced context with relevance explanations
+    enhanced_context = ""
+    for i, item in enumerate(context_data[:3], 1):
+        relevance_explanation = item.get('relevance_explanation', '')
+        if not relevance_explanation:
+            # Fallback: basic explanation
+            relevance_explanation = f"This content is related to your query."
+        enhanced_context += f"""
+Content {i}:
+Title: {item.get('title', 'Untitled')}
+Category: {item.get('category', 'general')}
+Keywords: {', '.join(item.get('keywords', [])[:5])}
+Why it's relevant: {relevance_explanation}
+Summary: {item.get('content', '')[:200]}...
 
-## Project Context
-You are an AI assistant for a personal knowledge management system that processes Instagram Reels content. The system allows users to build a searchable knowledge base from Reels insights and engage in conversational queries about stored content.
-
-## Core Responsibilities
-
-### 1. Content Analysis & Summarization
-- **Extract Key Information**: Identify main topics, actionable insights, tips, trends, and valuable takeaways from Reels
-- **Create Structured Summaries**: Generate concise, well-organized summaries that capture essential points
-- **Categorize Content**: Tag content by themes (business, lifestyle, education, entertainment, etc.)
-- **Identify Actionable Items**: Highlight practical advice, steps, or recommendations that users can implement
-
-### 2. Knowledge Base Management
-- **Content Organization**: Structure information for easy retrieval and cross-referencing
-- **Metadata Extraction**: Capture relevant details like creator, posting date, engagement metrics, hashtags
-- **Relationship Mapping**: Identify connections between different Reels and topics
-- **Quality Assessment**: Evaluate content credibility and relevance
-
-### 3. Conversational Interface
-- **Natural Query Processing**: Understand user questions about stored Reels insights
-- **Contextual Responses**: Provide relevant information from the knowledge base with proper citations
-- **Follow-up Suggestions**: Offer related insights or deeper exploration opportunities
-- **Synthesis**: Combine insights from multiple Reels to answer complex queries
-
-## Response Guidelines
-
-### When Summarizing Reels:
-- Lead with the most valuable insight or main takeaway
-- Use bullet points for multiple tips or steps
-- Include relevant context (creator expertise, target audience)
-- Note any visual elements that enhance understanding
-- Highlight trending topics or viral concepts
-
-### When Answering Queries:
-- Reference specific Reels when providing information
-- Combine insights from multiple sources when relevant
-- Acknowledge if information is limited or outdated
-- Suggest related content from the knowledge base
-- Provide actionable next steps when appropriate
-
-### Content Processing Format:
-```
-**Main Insight**: [Core takeaway in 1-2 sentences]
-**Category**: [Primary topic/theme]
-**Key Points**: 
-- [Actionable point 1]
-- [Actionable point 2]
-- [Additional insights]
-**Creator Context**: [Relevant background about content creator]
-**Related Topics**: [Connections to other stored content]
-```
-
-## Interaction Styles
-
-### For Content Ingestion:
-- Focus on extraction and organization
-- Maintain objectivity while noting subjective opinions
-- Preserve important nuances and context
-
-### For User Queries:
-- Be conversational and helpful
-- Provide comprehensive yet concise answers
-- Offer to dive deeper into specific aspects
-- Connect dots between different pieces of content
-
-## Special Considerations
-
-- **Privacy**: Handle personal content appropriately
-- **Credibility**: Note when content lacks verification or is opinion-based
-- **Trends**: Identify and track emerging patterns across multiple Reels
-- **Personalization**: Adapt responses based on user's apparent interests and query history
-- **Limitations**: Acknowledge when video content cannot be fully processed or understood
-
-## Error Handling
-- If content is unclear or ambiguous, ask for clarification
-- When information is insufficient, suggest ways to gather more context
-- If queries exceed available knowledge base, clearly state limitations
-
-Use this context to provide helpful, accurate, and insightful responses about Instagram Reels content while building and leveraging the personal knowledge management system.
 """
+
+    # Create enhanced intent-specific prompts
+    if intent == 'summary':
+        prompt = f'''The user asked: "{query}"
+
+Based on their saved content below, provide a comprehensive response that explains WHY each piece of content is relevant and what insights they offer:
+
+{enhanced_context}
+
+Please provide a response that:
+1. Directly answers their question using the content
+2. Explains WHY each piece of content is relevant to their query
+3. Highlights key insights and connections between content pieces
+4. Uses specific examples from the content
+5. Maintains a conversational, helpful tone
+
+Focus on making connections clear and actionable.
+
+Response:'''
+    elif intent == 'recommendation':
+        prompt = f'''The user asked: "{query}"
+
+Based on their content library below, provide thoughtful recommendations with clear explanations:
+
+{enhanced_context}
+
+Please provide:
+1. Specific recommendations based on their saved content patterns
+2. Clear explanations for WHY these recommendations fit their interests
+3. Connections between their saved content and the recommendations
+4. Actionable next steps they can take
+5. A friendly, advisory tone
+
+Response:'''
+    else:  # general and search
+        prompt = f'''The user asked: "{query}"
+
+Here's relevant content from their personal library with relevance explanations:
+
+{enhanced_context}
+
+Please provide a helpful response that:
+1. Directly addresses their question using the found content
+2. Explains WHY each piece of content is relevant (build on the provided explanations)
+3. Makes connections between different content pieces
+4. Offers additional insights or patterns you notice
+5. Maintains a conversational, knowledgeable tone
+
+Make the relevance connections clear and specific.
+
+Response:'''
+
+    try:
+        data = {
+            "model": OLLAMA_MODEL,
+            "messages": [{"role": "user", "content": prompt}]
+        }
+        response = requests.post(OLLAMA_API_URL, json=data)
+        response.raise_for_status()
         
-        # Generate response
-        response = llm(
-            prompt, 
-            max_tokens=300, 
-            stop=["Human:", "Assistant:"], 
-            echo=False
-        )
+        result = response.json()
+        generated_text = result["message"]["content"].strip()
         
-        return response['choices'][0]['text'].strip()
-    
+        # Clean up the response
+        if generated_text:
+            cleaned_response = re.sub(r'^(Response:|Answer:)', '', generated_text).strip()
+            return cleaned_response
+        else:
+            return "I found some relevant content but couldn't generate a detailed response. Let me show you what I found instead."
     except Exception as e:
-        logger.error(f"LLaMA response generation error: {e}")
+        logger.error(f"Ollama HTTP response generation error: {e}")
         return "I'm sorry, but I couldn't generate a response at the moment."
